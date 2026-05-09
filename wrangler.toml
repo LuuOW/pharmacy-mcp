@@ -1,0 +1,41 @@
+name = "pharmacy-mcp"
+main = "src/index.mjs"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Allow `import LOGIN_HTML from './login.html'` to read the file as text.
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
+
+# Bind to a custom domain. Update to whatever subdomain you want and run `wrangler deploy`.
+# routes = [
+#   { pattern = "pharmacy.ask-meridian.uk", custom_domain = true },
+# ]
+
+[observability]
+enabled = true
+
+# KV: stores MCP OAuth codes/tokens AND the VTEX session cookie + refresh token.
+# Create once: `wrangler kv:namespace create PHARMACY_KV` then paste id below.
+[[kv_namespaces]]
+binding = "PHARMACY_KV"
+id      = "REPLACE_WITH_KV_ID"
+
+# Cron: refresh the VTEX session every 6 hours so the cookie never expires.
+[triggers]
+crons = ["0 */6 * * *"]
+
+[vars]
+ISSUER             = "https://pharmacy-mcp.example.dev"
+VTEX_ACCOUNT       = "farmaciasdelpueblo"
+VTEX_HOST          = "www.farmaciasdelpueblo.com.ar"
+# reCAPTCHA Enterprise public site key (extracted from the site's HTML).
+# Public on purpose — every browser visiting the storefront sees it.
+RECAPTCHA_SITE_KEY = "6LdV7CIpAAAAAPUrHXWlFArQ5hSiNQJk6Ja-vcYM"
+
+# ALLOWED_EMAIL — pins the MCP to a single email so a stranger who finds the
+# /login URL can't bootstrap their own session against your worker. Set via:
+#   wrangler secret put ALLOWED_EMAIL
+# Leave unset (delete the secret) to allow any email.

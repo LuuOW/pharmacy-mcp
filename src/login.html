@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pharmacy MCP — Login</title>
+<style>
+  :root { color-scheme: dark }
+  * { box-sizing: border-box }
+  body {
+    background:#0b0d12; color:#e6eaf2; margin:0; padding:0; min-height:100vh;
+    font:14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    display:grid; place-items:center;
+  }
+  .card {
+    width:min(440px, calc(100vw - 32px));
+    background:#10131a; border:1px solid #1b2030; border-radius:14px;
+    padding:28px 28px 24px; box-shadow:0 24px 60px rgba(0,0,0,.4);
+  }
+  .logo  { font-size:24px; margin-bottom:12px }
+  h1     { font-size:18px; font-weight:600; margin:0 0 6px }
+  p      { color:#94a0b8; margin:0 0 16px }
+  label  { display:block; color:#94a0b8; font-size:12px; margin:14px 0 6px }
+  input {
+    width:100%; padding:10px 12px; border-radius:8px;
+    border:1px solid #1b2030; background:#0b0d12; color:#e6eaf2;
+    font:14px ui-sans-serif, system-ui, sans-serif;
+  }
+  input:focus { outline:0; border-color:#5b8cff }
+  button {
+    margin-top:16px; width:100%; padding:12px;
+    background:#5b8cff; color:#0b0d12; border:0; border-radius:8px;
+    font-weight:600; cursor:pointer; font-size:14px;
+  }
+  button:hover  { background:#7aa3ff }
+  button:disabled { background:#36405c; color:#94a0b8; cursor:not-allowed }
+  .hint  { color:#6c7790; font-size:11.5px; line-height:1.55; margin-top:14px }
+  .ok    { color:#86efac } .err { color:#fca5a5 }
+  .step  { display:none } .step.active { display:block }
+  .row   { margin-top:8px }
+  .meta  { margin-top:18px; padding-top:14px; border-top:1px solid #1b2030; color:#6c7790; font-size:11.5px }
+</style>
+</head>
+<body>
+  <form class="card" onsubmit="return false">
+    <div class="logo">💊</div>
+    <h1>Pharmacy MCP — Sign in</h1>
+    <p>Sign in to your Farmacias del Pueblo account once. The MCP keeps the session alive afterwards.</p>
+
+    <!-- Step 1: enter email, request access key -->
+    <div id="step-email" class="step active">
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="email" placeholder="you@example.com" value="__ALLOWED_EMAIL__">
+      <button id="send-btn" type="button" onclick="sendCode()">Send code to email</button>
+      <div id="send-status" class="row"></div>
+    </div>
+
+    <!-- Step 2: enter 6-digit code from email -->
+    <div id="step-code" class="step">
+      <label for="code">6-digit code from your inbox</label>
+      <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="123456">
+      <button id="verify-btn" type="button" onclick="verifyCode()">Verify and sign in</button>
+      <div id="verify-status" class="row"></div>
+      <div class="hint">Didn't get it? Check spam, then <a href="#" onclick="resetForm();return false">try again</a>.</div>
+    </div>
+
+    <!-- Step 3: success -->
+    <div id="step-done" class="step">
+      <div class="ok">✓ Signed in.</div>
+      <div class="hint" id="done-detail"></div>
+      <div class="hint">You can close this window. The MCP will refresh the session in the background.</div>
+    </div>
+
+    <div class="meta">
+      Captcha is solved by your browser via reCAPTCHA Enterprise. Email + code go directly to <code>www.farmaciasdelpueblo.com.ar</code>; the resulting auth cookie is bound to this server's IP, not yours.
+    </div>
+  </form>
+
+  <script src="https://www.google.com/recaptcha/enterprise.js?render=__SITE_KEY__"></script>
+  <script>
+    const SITE_KEY = '__SITE_KEY__'
+    let authToken  = null   // VTEX authenticationToken from /start
+
+    function setStatus(id, kind, text) {
+      const el = document.getElementById(id)
+      el.className = 'row ' + (kind || '')
+      el.textContent = text || ''
+    }
+    function show(stepId) {
+      for (const s of document.querySelectorAll('.step')) s.classList.remove('active')
+      document.getElementById(stepId).classList.add('active')
+    }
+    function resetForm() {
+      authToken = null
+      document.getElementById('code').value = ''
+      setStatus('send-status', '', '')
+      setStatus('verify-status', '', '')
+      show('step-email')
+    }
+
+    async function recaptcha(action) {
+      await new Promise((res) => grecaptcha.enterprise.ready(res))
+      return await grecaptcha.enterprise.execute(SITE_KEY, { action })
+    }
+
+    async function sendCode() {
+      const email = document.getElementById('email').value.trim()
+      if (!email) { setStatus('send-status', 'err', 'Enter your email first.'); return }
+      const btn = document.getElementById('send-btn')
+      btn.disabled = true; setStatus('send-status', '', 'Solving captcha…')
+      try {
+        const token = await recaptcha('login')
+        setStatus('send-status', '', 'Sending code…')
+        const r = await fetch('/api/auth/send', {
+          method:  'POST',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ email, recaptcha: token }),
+        })
+        const data = await r.json()
+        if (!r.ok || data.error) {
+          setStatus('send-status', 'err', data.error || ('HTTP ' + r.status))
+          btn.disabled = false; return
+        }
+        authToken = data.authenticationToken
+        setStatus('send-status', 'ok', '✓ Code sent. Check your inbox.')
+        show('step-code')
+      } catch (e) {
+        setStatus('send-status', 'err', 'Captcha or network failed: ' + (e.message || e))
+        btn.disabled = false
+      }
+    }
+
+    async function verifyCode() {
+      const email = document.getElementById('email').value.trim()
+      const code  = document.getElementById('code').value.trim()
+      if (!/^\d{6}$/.test(code)) { setStatus('verify-status', 'err', 'Enter the 6-digit code.'); return }
+      if (!authToken)            { setStatus('verify-status', 'err', 'Lost the auth token, please send a new code.'); return }
+      const btn = document.getElementById('verify-btn')
+      btn.disabled = true; setStatus('verify-status', '', 'Solving captcha…')
+      try {
+        const token = await recaptcha('login')
+        setStatus('verify-status', '', 'Verifying…')
+        const r = await fetch('/api/auth/validate', {
+          method:  'POST',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ email, code, recaptcha: token, authenticationToken: authToken }),
+        })
+        const data = await r.json()
+        if (!r.ok || data.error) {
+          setStatus('verify-status', 'err', data.error || data.authStatus || ('HTTP ' + r.status))
+          btn.disabled = false; return
+        }
+        document.getElementById('done-detail').textContent =
+          'Signed in as ' + (data.email || email) + '. Session expires ' +
+          (data.expires_at ? 'around ' + new Date(data.expires_at).toLocaleString() : 'in ~24h, will auto-refresh.')
+        show('step-done')
+      } catch (e) {
+        setStatus('verify-status', 'err', 'Verify failed: ' + (e.message || e))
+        btn.disabled = false
+      }
+    }
+  </script>
+</body>
+</html>
