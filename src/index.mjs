@@ -108,13 +108,17 @@ async function handleAuthSend(req, env) {
   if (env.ALLOWED_EMAIL && email !== env.ALLOWED_EMAIL.toLowerCase()) {
     return jsonResponse({ error: 'this MCP is locked to a single email' }, { status: 403 })
   }
+  console.log(`[auth/send] email=${email} recaptcha_len=${recaptcha.length}`)
   try {
     const start = await vtex.startAuthFlow(env)
+    console.log(`[auth/send] start: token_len=${start.authenticationToken?.length || 0} accessKey=${start.showAccessKeyAuthentication}`)
     if (!start.authenticationToken) return jsonResponse({ error: 'failed to obtain VTEX authenticationToken' }, { status: 502 })
     const send = await vtex.sendAccessKey(env, { authenticationToken: start.authenticationToken, email, recaptcha })
+    console.log(`[auth/send] vtex_status=${send.status} vtex_body=${JSON.stringify(send.body).slice(0, 300)}`)
     if (!send.ok) return jsonResponse({ error: `VTEX rejected send: ${send.status} ${send.body}` }, { status: 502 })
     return jsonResponse({ ok: true, authenticationToken: start.authenticationToken })
   } catch (e) {
+    console.log(`[auth/send] EXCEPTION: ${e.message || e}`)
     return jsonResponse({ error: e.message || String(e) }, { status: 502 })
   }
 }

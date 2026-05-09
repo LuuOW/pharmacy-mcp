@@ -1,84 +1,87 @@
 # pharmacy-mcp
 
-MCP for Farmacias del Pueblo (Argentine VTEX storefront). Browser-mediated
-reCAPTCHA bootstrap, headless cart automation thereafter.
+MCP for **Farmacias del Pueblo** (Argentine VTEX storefront). Lets your AI
+host search the catalog, build a cart over time, and hand the cart off to
+your browser for the final login + payment.
 
-## How it works
+Live at **https://botica.ask-meridian.uk** — tools at `/mcp`.
 
-VTEX gates every auth endpoint behind reCAPTCHA Enterprise v3 — unsolvable
-server-side. The trick this MCP uses:
+## What it actually does
 
-1. **The browser solves the captcha.** A static page at `/login` loads the
-   pharmacy's reCAPTCHA Enterprise script with the right site key and asks
-   `grecaptcha.enterprise.execute()` for a fresh action token.
-2. **The token is posted to the worker**, which forwards to VTEX's REST auth
-   endpoints from server-side. Crucially, the resulting `VtexIdclientAutCookie`
-   is bound to the **worker's** IP, not the user's — so the worker can keep
-   using it indefinitely.
-3. **A cron refreshes the session** every 6 hours via VTEX's
-   `/api/vtexid/refreshtoken/webstore`, so the user never has to log in again
-   (until the refresh-token chain itself expires, typically ~30 days).
+VTEX gates every authentication endpoint behind reCAPTCHA Enterprise v3 with
+**server-side hostname enforcement** — Google issues the token, but VTEX's
+backend rejects tokens that weren't generated on `www.farmaciasdelpueblo.com.ar`.
+We confirmed this empirically (the worker forwards a real 2233-char token,
+VTEX returns `200 {}` and silently drops the email). Without a real browser
+running on the pharmacy's own origin, server-side login isn't reachable.
 
-The browser is only required for the one-time login. After that the MCP runs
-fully headless — search, cart, address, shipping. Final payment still happens
-via a browser deeplink (`prepare_checkout`) because Argentine card payments
-require 3-D Secure that's hard to automate cleanly.
+So the MCP runs in **anonymous-cart mode**:
+
+1. Search the catalog (public API, no auth needed).
+2. Add items to an anonymous orderForm the worker keeps in KV.
+3. When you're ready, `prepare_checkout` returns a `/checkout/cart/add` URL —
+   open it in your browser, the pharmacy adds those SKUs to your real cart and
+   routes you to checkout. You finish login + payment in the place where they
+   already work (your browser, your captcha, your saved cards).
+
+You keep ~95% of the AI value — chat-driven search, recommendations, cart
+building over multiple sessions, "buy what I bought last time" — without
+needing a Browserbase-class headless browser to fight reCAPTCHA.
 
 ## Tools
 
-| Tool | Auth? | What it does |
-|---|---|---|
-| `search_products(query, limit)` | no | Search the catalog |
-| `get_categories()` | no | Top categories |
-| `browse_category(category_id, limit, page)` | no | List a category |
-| `view_cart()` | yes | Current cart with totals + payment options |
-| `add_to_cart(sku_id, quantity)` | yes | Add a SKU |
-| `remove_from_cart(item_index)` | yes | Remove by index |
-| `update_cart_item(item_index, quantity)` | yes | Change qty (0 removes) |
-| `set_shipping_address(postal_code, country)` | yes | Set ZIP for delivery quote |
-| `get_shipping_options()` | yes | Available delivery options + prices |
-| `prepare_checkout()` | yes | Returns a deeplink to finish payment in browser |
-| `auth_status()` | meta | Is the VTEX session live? when does it expire? |
+| Tool | What it does |
+|---|---|
+| `search_products(query, limit)` | Search the catalog (Spanish queries work best) |
+| `get_categories()` | Top-level category tree |
+| `browse_category(category_id, limit, page)` | List a category |
+| `view_cart()` | Current cart with items, totals, shipping options |
+| `add_to_cart(sku_id, quantity)` | Add a SKU |
+| `remove_from_cart(item_index)` | Remove by index (0-based, see `view_cart`) |
+| `update_cart_item(item_index, quantity)` | Change qty (0 removes) |
+| `clear_cart()` | Empty the cart (drops the stored orderForm) |
+| `set_shipping_address(postal_code, country)` | Set ZIP for delivery quote |
+| `get_shipping_options()` | Available delivery options + prices |
+| `prepare_checkout()` | Returns the `/checkout/cart/add` URL for the browser hand-off |
+| `auth_status()` | Reports whether the (currently dormant) server-side VTEX session is active |
 
-## Deploy
+## Use it
+
+In Grok / Claude.ai / ChatGPT connector settings, add a custom MCP:
+
+- **MCP URL:** `https://botica.ask-meridian.uk/mcp`
+- **Auth:** OAuth 2.1 + PKCE. The host discovers
+  `/.well-known/oauth-authorization-server` and walks through `/authorize`.
+- **Client ID:** any non-empty string (we only check presence)
+- **Client Secret:** *empty* — PKCE replaces it
+- **Scopes:** `pharmacy_cart`
+- **Token Auth Method:** `none (PKCE only)`
+
+Once authorized, the public tools work immediately. Cart tools work
+immediately too (anonymous orderForm). No `/login` step needed in this mode.
+
+## Deploy from scratch
 
 ```sh
 cd pharmacy-mcp
 npm install
-
-# Create the KV namespace and copy the id into wrangler.toml.
-wrangler kv:namespace create PHARMACY_KV
-# → put the printed id under [[kv_namespaces]] in wrangler.toml
-
-# Pick a domain. Either use a workers.dev subdomain (default) or bind a custom
-# domain. If you go custom, uncomment the `routes` block in wrangler.toml and
-# update wrangler.toml's `vars.ISSUER` to match.
-
+wrangler kv namespace create PHARMACY_KV
+# paste the printed id into wrangler.toml under [[kv_namespaces]]
 wrangler deploy
 ```
 
-## Bootstrap the VTEX session
+To bind a custom domain, the `routes = [{ pattern = "...", custom_domain = true }]`
+block in `wrangler.toml` is honored on a clean deploy. Wrangler 3.114 has been
+seen to silently skip it; if so, attach manually via the API:
 
-1. Open `https://<your-worker-domain>/login` in any browser.
-2. Email is pre-filled with `ALLOWED_EMAIL`. Click **Send code** — your browser
-   solves the captcha and the worker forwards the request to VTEX. A 6-digit
-   code lands in your inbox.
-3. Paste the code, click **Verify**. The worker validates with VTEX, stores the
-   resulting cookie + refresh token in KV.
-4. You're done. Close the tab.
-
-The cron tick (every 6h) keeps the cookie fresh from then on. If a refresh
-ever fails (e.g. VTEX rotates something), `view_cart` or any authed tool will
-return a "not authenticated, visit /login" error and you redo step 1.
-
-## Connect to Claude.ai / Grok / ChatGPT
-
-The MCP itself is OAuth 2.1 + PKCE protected (separate from the VTEX login).
-In your AI host's connector settings, point it at:
-
-- Streamable HTTP MCP URL: `https://<worker-domain>/mcp`
-- The host will discover `.well-known/oauth-authorization-server` and walk
-  through the `/authorize` page automatically.
+```sh
+ZONE_ID=$(curl -sH "Authorization: Bearer $CF_TOKEN" \
+  "https://api.cloudflare.com/client/v4/zones?name=<your-zone>" \
+  | jq -r '.result[0].id')
+curl -X PUT -H "Authorization: Bearer $CF_TOKEN" \
+  "https://api.cloudflare.com/client/v4/accounts/$ACCT_ID/workers/domains" \
+  -d '{"environment":"production","hostname":"botica.<zone>","service":"pharmacy-mcp","zone_id":"'$ZONE_ID'"}'
+```
 
 ## Environment
 
@@ -89,40 +92,64 @@ Set in `wrangler.toml` under `[vars]`:
 | `ISSUER` | Public URL of this worker (used in OAuth metadata) |
 | `VTEX_ACCOUNT` | `farmaciasdelpueblo` |
 | `VTEX_HOST` | `www.farmaciasdelpueblo.com.ar` |
-| `RECAPTCHA_SITE_KEY` | `6LdV7CIpAAAAAPUrHXWlFArQ5hSiNQJk6Ja-vcYM` (extracted from the site's HTML) |
+| `RECAPTCHA_SITE_KEY` | `6LdV7CIpAAAAAPUrHXWlFArQ5hSiNQJk6Ja-vcYM` (public — extracted from the site's HTML) |
 
-Set via `wrangler secret put`:
+Optional secret via `wrangler secret put`:
 
 | Secret | What |
 |---|---|
-| `ALLOWED_EMAIL` | Pins the MCP to a single email so the public `/login` URL can't be used by anyone else. Leave unset to allow any email. |
+| `ALLOWED_EMAIL` | Currently unused (auth path is dormant). Was meant to pin `/login` to a single email so a stranger couldn't register-via-our-worker. Re-becomes relevant once the auth path is re-enabled. |
 
-No upstream credentials are stored — captcha is solved browser-side and the
-resulting VTEX cookie is bound to the worker.
+## What's still in the codebase but dormant
 
-## Known risks
+`/login`, `/api/auth/send`, `/api/auth/validate`, the captcha JS in
+`src/login.html`, the cron-based session refresher in `src/index.mjs`, and
+`startAuthFlow / sendAccessKey / validateAccessKey / refreshAuthCookie` in
+`src/vtex.mjs` are all kept in-tree on purpose. They wired up cleanly and are
+shaped correctly for VTEX's REST auth — they just can't pass the captcha
+hostname check from this origin. If you ever route the login dance through a
+real browser running on `www.farmaciasdelpueblo.com.ar` (Browserbase, an
+extension, or a stealth Playwright on Fly), this code is the consumer side
+already in place. See "Future: Browserbase mode" below.
 
-- **reCAPTCHA Enterprise origin restriction.** If the site key is configured
-  with a strict allowed-domains list, `grecaptcha.execute()` will refuse to
-  generate tokens from `<your-worker-domain>`. Fix: register your worker's
-  domain in the reCAPTCHA Enterprise admin (you'd need access to the
-  pharmacy's reCAPTCHA console — you don't, so you'd need a workaround). If
-  this hits, the `/login` page fails at "Solving captcha…" with a Google error.
-- **Account rate-limit.** Burning too many failed code attempts triggers a
-  ~30 min lockout. Don't auto-retry; surface the error.
-- **Cookie binding strength.** VTEX binds the cookie to the issuing IP. As
-  long as the worker stays on the same edge IPs (Cloudflare's pool), it's
-  fine — but if VTEX ever tightens this to "single IP", we'd see 401s and need
-  to add a residential proxy.
+## Future: Browserbase mode
+
+To unlock the full original architecture (server-side authenticated cart
+operations, saved-card payments, automated re-orders), the missing piece is a
+real browser running on the pharmacy's own origin. Sketch:
+
+1. Browserbase / Playwright spawns a session at
+   `https://www.farmaciasdelpueblo.com.ar/login`.
+2. It runs the same access-key flow as a human would — captcha is solved by
+   Google in the browser context, hostname matches.
+3. After validating the 6-digit code, the resulting `VtexIdclientAutCookie`
+   gets exfiltrated and POSTed to `/api/auth/import-cookie` (a small new
+   endpoint we'd add).
+4. Worker stores it in KV. Cron `/api/vtexid/refreshtoken/webstore` keeps it
+   alive.
+5. The cart tools flip from "anonymous orderForm + browser hand-off" to
+   "authenticated orderForm + server-side checkout submit".
+
+Cost: ~$10–30/mo for Browserbase or ~$5/mo for a small Fly Playwright sidecar.
+Until that's worth building, the anonymous-cart mode is the right shape.
 
 ## File layout
 
 ```
 src/
-  index.mjs      Worker entry — routes, OAuth shell, MCP handler, cron
-  vtex.mjs       VTEX REST client (auth + catalog + cart + shipping)
+  index.mjs      Worker entry — routes, OAuth, MCP, dormant /login, cron
+  vtex.mjs       VTEX REST client (catalog + anonymous cart + shipping; auth funcs dormant)
   tools.mjs      MCP tool definitions and dispatch
-  login.html     Browser-mediated bootstrap page (reCAPTCHA + email + code)
-wrangler.toml    CF Worker config
+  login.html     Dormant: was the browser-mediated login; kept for Browserbase re-enable
+wrangler.toml    CF Worker config (KV, cron, custom domain, vars)
 package.json
 ```
+
+## Why this design instead of a real headless-browser stack today
+
+A pharmacy MCP I'll use weekly-ish from my phone doesn't justify
+$30/mo + Browserbase maintenance. The hand-off pattern leaves one tap-to-pay
+in my browser anyway (Argentine 3-D Secure on first card use after a fresh
+session), so "fully automated" was an illusion of value beyond what the
+hand-off already gives. If I find myself wishing the cart auto-checked-out
+weekly without me, that's the moment to build Browserbase mode.

@@ -158,6 +158,13 @@ export async function clearSession(env) {
   await env.PHARMACY_KV.delete(COOKIE_KEY)
 }
 
+// NOTE: dormant. Originally guarded the cart tools so they could attach the
+// VTEX auth cookie to every request. We discovered that this tenant enforces
+// reCAPTCHA Enterprise origin-binding on /accesskey/send, so the worker can't
+// mint a server-side session. Cart tools now operate on an anonymous
+// orderForm and hand the cart to the user's browser via prepare_checkout.
+// Kept here so a future Browserbase-mediated login can re-enable the path
+// without re-introducing the function.
 async function requireAuthCookie(env) {
   const sess = await getActiveSession(env)
   if (!sess?.authCookie) {
@@ -190,59 +197,58 @@ export async function browseCategory(env, { categoryId, from = 0, to = 19 }) {
 }
 
 // ─── orderForm (cart) ──────────────────────────────────────────────
+//
+// All operations work on an *anonymous* orderForm — no VTEX auth cookie.
+// The orderForm id is persisted in KV so the cart survives across MCP
+// sessions. When the user is ready to check out, prepare_checkout reads
+// the items and emits a /checkout/cart/add URL that the user opens in
+// their browser; their browser handles login + payment in its own
+// origin-correct context.
 
-// Returns the orderFormId, fetching from KV or creating a fresh one.
-// Always attaches the auth cookie so the orderForm is bound to the user.
 async function getOrCreateOrderForm(env) {
-  const sess = await requireAuthCookie(env)
   let id = await env.PHARMACY_KV.get(ORDERFORM_KEY)
   if (id) {
-    // Verify it still exists.
     try {
-      await viewOrderFormRaw(env, sess, id)
-      return { id, sess }
+      await viewOrderFormRaw(env, id)
+      return { id }
     } catch (e) {
       if (e.status !== 404) throw e
     }
   }
-  // Create fresh.
   const url = `${baseUrl(env)}/api/checkout/pub/orderForm`
   const res = await fetch(url, {
     method:  'POST',
-    headers: defaultHeaders(env, {
-      'cookie': buildCookieHeader(env, sess.authCookie),
-      'content-type': 'application/json',
-    }),
+    headers: defaultHeaders(env, { 'content-type': 'application/json' }),
     body: '{}',
   })
   const data = await jsonOrThrow(res, 'orderForm create')
   id = data.orderFormId
   await env.PHARMACY_KV.put(ORDERFORM_KEY, id)
-  return { id, sess }
+  return { id }
 }
 
-async function viewOrderFormRaw(env, sess, id) {
+async function viewOrderFormRaw(env, id) {
   const url = `${baseUrl(env)}/api/checkout/pub/orderForm/${id}`
   const res = await fetch(url, {
-    headers: defaultHeaders(env, { 'cookie': buildCookieHeader(env, sess.authCookie, id) }),
+    headers: defaultHeaders(env, { 'cookie': `checkout.vtex.com=__ofid=${id}` }),
   })
   return await jsonOrThrow(res, 'orderForm view')
 }
 
 export async function viewCart(env) {
-  const { id, sess } = await getOrCreateOrderForm(env)
-  const data = await viewOrderFormRaw(env, sess, id)
+  const { id } = await getOrCreateOrderForm(env)
+  const data = await viewOrderFormRaw(env, id)
   return summarizeOrderForm(data)
 }
 
 export async function addToCart(env, { skuId, quantity = 1, seller = '1' }) {
-  const { id, sess } = await getOrCreateOrderForm(env)
+  const { id } = await getOrCreateOrderForm(env)
   const url  = `${baseUrl(env)}/api/checkout/pub/orderForm/${id}/items`
   const body = JSON.stringify({ orderItems: [{ id: String(skuId), quantity, seller }] })
   const res  = await fetch(url, {
     method:  'POST',
     headers: defaultHeaders(env, {
-      'cookie':       buildCookieHeader(env, sess.authCookie, id),
+      'cookie':       `checkout.vtex.com=__ofid=${id}`,
       'content-type': 'application/json',
     }),
     body,
@@ -252,13 +258,13 @@ export async function addToCart(env, { skuId, quantity = 1, seller = '1' }) {
 }
 
 export async function updateCartItem(env, { itemIndex, quantity }) {
-  const { id, sess } = await getOrCreateOrderForm(env)
+  const { id } = await getOrCreateOrderForm(env)
   const url  = `${baseUrl(env)}/api/checkout/pub/orderForm/${id}/items/update`
   const body = JSON.stringify({ orderItems: [{ index: itemIndex, quantity }] })
   const res  = await fetch(url, {
     method:  'POST',
     headers: defaultHeaders(env, {
-      'cookie':       buildCookieHeader(env, sess.authCookie, id),
+      'cookie':       `checkout.vtex.com=__ofid=${id}`,
       'content-type': 'application/json',
     }),
     body,
@@ -272,7 +278,7 @@ export async function removeFromCart(env, { itemIndex }) {
 }
 
 export async function setShippingAddress(env, { postalCode, country = 'ARG' }) {
-  const { id, sess } = await getOrCreateOrderForm(env)
+  const { id } = await getOrCreateOrderForm(env)
   const url = `${baseUrl(env)}/api/checkout/pub/orderForm/${id}/attachments/shippingData`
   const body = JSON.stringify({
     address:           { addressType: 'residential', postalCode, country, geoCoordinates: [] },
@@ -281,13 +287,33 @@ export async function setShippingAddress(env, { postalCode, country = 'ARG' }) {
   const res = await fetch(url, {
     method:  'POST',
     headers: defaultHeaders(env, {
-      'cookie':       buildCookieHeader(env, sess.authCookie, id),
+      'cookie':       `checkout.vtex.com=__ofid=${id}`,
       'content-type': 'application/json',
     }),
     body,
   })
   const data = await jsonOrThrow(res, 'shippingData')
   return summarizeOrderForm(data)
+}
+
+export async function clearCart(env) {
+  await env.PHARMACY_KV.delete(ORDERFORM_KEY)
+  return { cleared: true }
+}
+
+// Build the public VTEX cart-handoff URL: opens in the user's browser,
+// VTEX adds these SKUs to whatever orderForm the browser already has
+// (anonymous or logged-in), then routes to checkout.
+export function buildCheckoutUrl(env, items) {
+  const u = new URL(`${baseUrl(env)}/checkout/cart/add`)
+  for (const it of items) {
+    u.searchParams.append('sku',    String(it.skuId))
+    u.searchParams.append('qty',    String(it.quantity || 1))
+    u.searchParams.append('seller', String(it.seller || '1'))
+  }
+  u.searchParams.set('redirect', 'true')
+  u.searchParams.set('sc', '1')
+  return u.toString()
 }
 
 export async function shippingSimulation(env, { items, postalCode, country = 'ARG' }) {

@@ -40,12 +40,12 @@ export const TOOLS = [
   },
   {
     name:        'view_cart',
-    description: 'View the current cart (orderForm) — items, totals, shipping, payment options. Requires login.',
+    description: 'View the current anonymous cart — items, totals, shipping options, payment systems available on this storefront. The cart persists across MCP sessions.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name:        'add_to_cart',
-    description: 'Add a product (by SKU id from search_products) to the cart. Requires login.',
+    description: 'Add a product (by SKU id from search_products) to the cart.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,7 +57,7 @@ export const TOOLS = [
   },
   {
     name:        'remove_from_cart',
-    description: 'Remove an item from the cart by its index (0-based, see view_cart). Requires login.',
+    description: 'Remove an item from the cart by its index (0-based, see view_cart).',
     inputSchema: {
       type: 'object',
       properties: { item_index: { type: 'integer', minimum: 0 } },
@@ -66,7 +66,7 @@ export const TOOLS = [
   },
   {
     name:        'update_cart_item',
-    description: 'Change the quantity of a cart item. Set quantity 0 to remove. Requires login.',
+    description: 'Change the quantity of a cart item. Set quantity 0 to remove.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -77,8 +77,13 @@ export const TOOLS = [
     },
   },
   {
+    name:        'clear_cart',
+    description: 'Empty the cart (drops the stored anonymous orderForm). Use after a successful checkout hand-off, or to start over.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name:        'set_shipping_address',
-    description: 'Set the shipping postal code on the cart so delivery options + final price compute. Requires login.',
+    description: 'Set the shipping postal code on the cart so delivery options + final price compute.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -90,17 +95,17 @@ export const TOOLS = [
   },
   {
     name:        'get_shipping_options',
-    description: 'List available shipping/pickup options for the current cart + address (must call set_shipping_address first). Requires login.',
+    description: 'List available shipping/pickup options for the current cart + address (must call set_shipping_address first).',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name:        'prepare_checkout',
-    description: 'Returns a deeplink URL you can open in a browser to finish login + payment. The cart is preserved across the hand-off. Requires login.',
+    description: 'Hand the cart to the user\'s browser. Returns a /checkout/cart/add URL that, when opened, appends every item to the browser\'s own cart on the pharmacy site and routes to checkout — where the user finishes login + payment in their normal session.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name:        'auth_status',
-    description: 'Returns whether the MCP has an active VTEX session, the email it belongs to, and when it expires.',
+    description: 'Reports the worker\'s VTEX session state. Currently always inactive — server-side login is gated by reCAPTCHA Enterprise origin enforcement on this tenant. Tool kept for future Browserbase-backed re-enablement.',
     inputSchema: { type: 'object', properties: {} },
   },
 ]
@@ -168,22 +173,34 @@ export async function handleToolCall(env, name, args = {}) {
       const cart = await vtex.viewCart(env)
       return { options: cart.shipping.deliveryOptions, postal_code: cart.shipping.postalCode }
     }
+    case 'clear_cart': {
+      return await vtex.clearCart(env)
+    }
     case 'prepare_checkout': {
       const cart = await vtex.viewCart(env)
-      const checkoutUrl = `https://${env.VTEX_HOST}/checkout?orderFormId=${cart.orderFormId}#/cart`
+      if (!cart.items.length) {
+        return { error: 'cart is empty — add items before preparing checkout' }
+      }
+      const checkout_url = vtex.buildCheckoutUrl(env, cart.items.map(it => ({
+        skuId: it.skuId, quantity: it.quantity, seller: '1',
+      })))
       return {
-        checkout_url: checkoutUrl,
-        message: 'Open this URL in your browser to complete login + payment. Cart contents are preserved.',
-        cart_summary: {
-          items_count: cart.items.length,
-          total:       cart.value,
-          email:       cart.email,
-        },
+        checkout_url,
+        message: 'Open this URL in the browser where you are logged into farmaciasdelpueblo.com.ar. The pharmacy will add these SKUs to your existing cart and route you to checkout. The MCP-side cart is left intact; call clear_cart once the order is placed.',
+        items: cart.items.map(it => ({ sku_id: it.skuId, name: it.name, quantity: it.quantity, price: it.price })),
+        items_count: cart.items.length,
+        total:       cart.value,
       }
     }
     case 'auth_status': {
       const sess = await vtex.getActiveSession(env)
-      if (!sess) return { logged_in: false, hint: 'Visit /login to bootstrap a session.' }
+      if (!sess) {
+        return {
+          logged_in: false,
+          mode:      'anonymous-cart',
+          note:      'Server-side VTEX auth is dormant on this tenant due to reCAPTCHA Enterprise origin enforcement. Cart tools work anonymously; checkout hands off to the browser. Re-enable this path with a Browserbase-mediated login.',
+        }
+      }
       const expiresInSec = Math.max(0, Math.floor(((sess.expiresAt || 0) - Date.now()) / 1000))
       return {
         logged_in:       true,
