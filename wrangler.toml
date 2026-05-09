@@ -9,10 +9,9 @@ type = "Text"
 globs = ["**/*.html"]
 fallthrough = true
 
-# Bind to a custom domain. Update to whatever subdomain you want and run `wrangler deploy`.
-# routes = [
-#   { pattern = "pharmacy.ask-meridian.uk", custom_domain = true },
-# ]
+routes = [
+  { pattern = "botica.ask-meridian.uk", custom_domain = true },
+]
 
 [observability]
 enabled = true
@@ -28,7 +27,7 @@ id      = "6beda281779d43ee973f727cada440f8"
 crons = ["0 */6 * * *"]
 
 [vars]
-ISSUER             = "https://pharmacy-mcp.lucas-kempe.workers.dev"
+ISSUER             = "https://botica.ask-meridian.uk"
 VTEX_ACCOUNT       = "farmaciasdelpueblo"
 VTEX_HOST          = "www.farmaciasdelpueblo.com.ar"
 # reCAPTCHA Enterprise public site key (extracted from the site's HTML).
