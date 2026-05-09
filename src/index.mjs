@@ -82,10 +82,19 @@ function escapeHtml(s) {
 
 // ─── /login ─────────────────────────────────────────────────────────
 
-function renderLoginPage(env) {
+function renderLoginPage(env, oauthFormHtml = '') {
   return LOGIN_HTML
     .replaceAll('__SITE_KEY__',      env.RECAPTCHA_SITE_KEY)
     .replaceAll('__ALLOWED_EMAIL__', env.ALLOWED_EMAIL || '')
+    .replaceAll('__OAUTH_FORM__',    oauthFormHtml)
+}
+
+// Hidden form posted to /authorize once VTEX login completes. Carries the
+// OAuth params untouched so PKCE + state survive the round-trip.
+function buildOAuthConsentForm(params) {
+  const inputs = AUTH_PARAMS.map(k =>
+    `      <input type="hidden" name="${k}" value="${escapeHtml(params.get(k) || '')}">`).join('\n')
+  return `<form id="oauth-consent" method="POST" action="/authorize" style="display:none">\n${inputs}\n    </form>`
 }
 
 // ─── /api/auth/* ────────────────────────────────────────────────────
@@ -218,13 +227,20 @@ function renderAuthorizePage(params) {
   </form></body></html>`
 }
 
-async function handleAuthorizeGet(url) {
+async function handleAuthorizeGet(url, env) {
   const p = url.searchParams
   for (const k of ['response_type','client_id','redirect_uri','code_challenge','code_challenge_method']) {
     if (!p.get(k)) return textResponse(`missing ${k}`, { status: 400 })
   }
   if (p.get('response_type')        !== 'code') return textResponse('only response_type=code', { status: 400 })
   if (p.get('code_challenge_method') !== 'S256') return textResponse('only S256',               { status: 400 })
+
+  // If there's no live VTEX session, show the login flow first and have it
+  // auto-submit the OAuth consent on success — single browser session.
+  const sess = await vtex.getActiveSession(env)
+  if (!sess?.authCookie || (sess.expiresAt || 0) <= Date.now()) {
+    return htmlResponse(renderLoginPage(env, buildOAuthConsentForm(p)))
+  }
   return htmlResponse(renderAuthorizePage(p))
 }
 
@@ -426,7 +442,7 @@ export default {
     // OAuth + MCP
     if (url.pathname === '/.well-known/oauth-authorization-server') return jsonResponse(discoveryAS(env))
     if (url.pathname === '/.well-known/oauth-protected-resource')   return jsonResponse(discoveryProtectedResource(env))
-    if (url.pathname === '/authorize' && request.method === 'GET')  return handleAuthorizeGet(url)
+    if (url.pathname === '/authorize' && request.method === 'GET')  return handleAuthorizeGet(url, env)
     if (url.pathname === '/authorize' && request.method === 'POST') return handleAuthorizePost(request, env)
     if (url.pathname === '/token'     && request.method === 'POST') return handleTokenPost(request, env)
     if (url.pathname === '/mcp')                                    return handleMcp(request, env)

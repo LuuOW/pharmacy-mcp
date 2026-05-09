@@ -44,8 +44,12 @@
 <body>
   <form class="card" onsubmit="return false">
     <div class="logo">💊</div>
-    <h1>Pharmacy MCP — Sign in</h1>
-    <p>Sign in to your Farmacias del Pueblo account once. The MCP keeps the session alive afterwards.</p>
+    <h1 id="title">Pharmacy MCP — Sign in</h1>
+    <p id="lede">Sign in to your Farmacias del Pueblo account once. The MCP keeps the session alive afterwards.</p>
+
+    <!-- OAuth-context form. When present (rendered server-side via /authorize),
+         a successful verify auto-submits this so Grok / the AI host gets its code. -->
+    __OAUTH_FORM__
 
     <!-- Step 1: enter email, request access key -->
     <div id="step-email" class="step active">
@@ -66,9 +70,9 @@
 
     <!-- Step 3: success -->
     <div id="step-done" class="step">
-      <div class="ok">✓ Signed in.</div>
+      <div class="ok" id="done-headline">✓ Signed in.</div>
       <div class="hint" id="done-detail"></div>
-      <div class="hint">You can close this window. The MCP will refresh the session in the background.</div>
+      <div class="hint" id="done-tail">You can close this window. The MCP will refresh the session in the background.</div>
     </div>
 
     <div class="meta">
@@ -80,6 +84,18 @@
   <script>
     const SITE_KEY = '__SITE_KEY__'
     let authToken  = null   // VTEX authenticationToken from /start
+
+    // If we're in OAuth context (page rendered from /authorize), the server
+    // injected a hidden <form id="oauth-consent"> with the OAuth params.
+    // Detect it and adapt the copy + the success path so the user lands back
+    // in their AI host without a second click.
+    const oauthForm = document.getElementById('oauth-consent')
+    if (oauthForm) {
+      document.getElementById('title').textContent = 'Sign in to authorize'
+      document.getElementById('lede').innerHTML =
+        'Sign in to your Farmacias del Pueblo account so your AI host can use the Pharmacy MCP. ' +
+        'You only do this once — the MCP keeps the session alive in the background.'
+    }
 
     function setStatus(id, kind, text) {
       const el = document.getElementById(id)
@@ -154,6 +170,14 @@
           'Signed in as ' + (data.email || email) + '. Session expires ' +
           (data.expires_at ? 'around ' + new Date(data.expires_at).toLocaleString() : 'in ~24h, will auto-refresh.')
         show('step-done')
+
+        // OAuth flow: auto-submit the consent form so the AI host receives its
+        // authorization code. Standalone /login: just show the success message.
+        if (oauthForm) {
+          document.getElementById('done-headline').textContent = '✓ Signed in. Returning to your AI host…'
+          document.getElementById('done-tail').textContent     = 'You will be redirected automatically.'
+          setTimeout(() => oauthForm.submit(), 900)
+        }
       } catch (e) {
         setStatus('verify-status', 'err', 'Verify failed: ' + (e.message || e))
         btn.disabled = false
