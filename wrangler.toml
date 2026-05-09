@@ -21,14 +21,14 @@ enabled = true
 # Create once: `wrangler kv:namespace create PHARMACY_KV` then paste id below.
 [[kv_namespaces]]
 binding = "PHARMACY_KV"
-id      = "REPLACE_WITH_KV_ID"
+id      = "6beda281779d43ee973f727cada440f8"
 
 # Cron: refresh the VTEX session every 6 hours so the cookie never expires.
 [triggers]
 crons = ["0 */6 * * *"]
 
 [vars]
-ISSUER             = "https://pharmacy-mcp.example.dev"
+ISSUER             = "https://pharmacy-mcp.lucas-kempe.workers.dev"
 VTEX_ACCOUNT       = "farmaciasdelpueblo"
 VTEX_HOST          = "www.farmaciasdelpueblo.com.ar"
 # reCAPTCHA Enterprise public site key (extracted from the site's HTML).
