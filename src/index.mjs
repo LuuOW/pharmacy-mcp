@@ -222,12 +222,12 @@ function renderAuthorizePage(params) {
     <p>This connects your AI host to the Farmacias del Pueblo cart automation. The host will be able to:</p>
     <ul>
       <li>Search the catalog and read product info</li>
-      <li>Read, add, remove, and update items in your cart</li>
+      <li>Read, add, remove, and update items in an anonymous cart</li>
       <li>Set shipping address + see delivery options</li>
-      <li>Generate a checkout deeplink for you to finish payment in your browser</li>
+      <li>Build a <code>/checkout/cart/add</code> URL that hands the cart to your browser for login + payment</li>
     </ul>
     <button type="submit">Authorize</button>
-    <div class="meta">VTEX login is bootstrapped separately at <a href="/login" style="color:#7aa3ff">/login</a>. The MCP only works once that's done.</div>
+    <div class="meta">Anonymous-cart mode. Search and cart tools work immediately after authorization; <code>prepare_checkout</code> emits a <code>/checkout/cart/add</code> URL you open in your own browser to finish login + payment.</div>
   </form></body></html>`
 }
 
@@ -239,12 +239,11 @@ async function handleAuthorizeGet(url, env) {
   if (p.get('response_type')        !== 'code') return textResponse('only response_type=code', { status: 400 })
   if (p.get('code_challenge_method') !== 'S256') return textResponse('only S256',               { status: 400 })
 
-  // If there's no live VTEX session, show the login flow first and have it
-  // auto-submit the OAuth consent on success — single browser session.
-  const sess = await vtex.getActiveSession(env)
-  if (!sess?.authCookie || (sess.expiresAt || 0) <= Date.now()) {
-    return htmlResponse(renderLoginPage(env, buildOAuthConsentForm(p)))
-  }
+  // Anonymous-cart mode: server-side VTEX login is dormant (captcha origin
+  // enforced — see README). The connector consent page is the only step
+  // here. The merged login+consent path stays in this file for the day a
+  // Browserbase-backed re-enable flips it back on; until then, show the
+  // simple consent page directly.
   return htmlResponse(renderAuthorizePage(p))
 }
 
